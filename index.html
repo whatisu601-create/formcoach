@@ -17,7 +17,7 @@
   #hud {
     position: absolute; top: 0; left: 0; right: 0;
     z-index: 3; padding: 20px; color: #fff;
-    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    text-shadow: 0 2px 8px rgba(0,0,0,0.9);
     display: flex; justify-content: space-between; align-items: flex-start;
     pointer-events: none;
   }
@@ -25,12 +25,21 @@
   #reps-label { font-size: 14px; opacity: 0.7; letter-spacing: 2px; text-transform: uppercase; }
   #right { text-align: right; }
   #status { font-size: 13px; opacity: 0.8; }
-  #angle { font-size: 28px; font-weight: 700; margin-top: 4px; }
-  #state { font-size: 20px; font-weight: 800; margin-top: 4px; letter-spacing: 1px; }
+  #angle { font-size: 32px; font-weight: 700; margin-top: 4px; }
+  #state { font-size: 22px; font-weight: 800; margin-top: 4px; letter-spacing: 1px; }
   #state.up { color: #22c55e; }
   #state.down { color: #f59e0b; }
+  #debug {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    z-index: 3; padding: 12px 20px;
+    font-family: monospace; font-size: 11px; color: #0f0;
+    background: rgba(0,0,0,0.5);
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 12px;
+  }
+  #debug span.miss { color: #f00; }
+  #debug span.hit { color: #0f0; }
   #startBtn {
-    position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+    position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%);
     z-index: 4; padding: 16px 40px; border-radius: 100px;
     background: #22c55e; color: #000; font-size: 18px; font-weight: 700;
     border: none; box-shadow: 0 8px 24px rgba(34,197,94,0.5);
@@ -53,6 +62,8 @@
     </div>
   </div>
 
+  <div id="debug"></div>
+
   <button id="startBtn">Start</button>
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
@@ -68,16 +79,24 @@ const repsEl = document.getElementById('reps');
 const statusEl = document.getElementById('status');
 const angleEl = document.getElementById('angle');
 const stateEl = document.getElementById('state');
+const debugEl = document.getElementById('debug');
 const startBtn = document.getElementById('startBtn');
 
 let detector = null;
 let running = false;
 
-// Squat state
 let reps = 0;
-let phase = 'up';          // 'up' or 'down'
-const UP_ANGLE = 160;      // above this = standing
-const DOWN_ANGLE = 100;    // below this = bottom of squat
+let phase = 'up';
+const UP_ANGLE = 160;
+const DOWN_ANGLE = 100;
+const MIN_SCORE = 0.35;
+
+// Keypoint name mapping for debug
+const KP_NAMES = [
+  'nose','lEye','rEye','lEar','rEar',
+  'lShldr','rShldr','lElbow','rElbow','lWrist','rWrist',
+  'lHip','rHip','lKnee','rKnee','lAnkle','rAnkle'
+];
 
 const CONNECTIONS = [
   [0,1],[0,2],[1,3],[2,4],
@@ -86,14 +105,19 @@ const CONNECTIONS = [
   [11,13],[13,15],[12,14],[14,16]
 ];
 
-// MoveNet keypoint indices
 const L_HIP = 11, L_KNEE = 13, L_ANKLE = 15;
 const R_HIP = 12, R_KNEE = 14, R_ANKLE = 16;
+
+// --- Smoothing buffer ---
+const SMOOTH_N = 5;
+const angleHistory = [];
+
+// --- Bounding box crop (expands pose detection accuracy) ---
+let lastBox = null; // {x, y, w, h} in video pixel space
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
 function angle(a, b, c) {
-  // Angle at point b, between a-b and c-b
   const ab = { x: a.x - b.x, y: a.y - b.y };
   const cb = { x: c.x - b.x, y: c.y - b.y };
   const dot = ab.x * cb.x + ab.y * cb.y;
@@ -102,6 +126,14 @@ function angle(a, b, c) {
   if (magA === 0 || magC === 0) return null;
   const cos = Math.max(-1, Math.min(1, dot / (magA * magC)));
   return Math.acos(cos) * (180 / Math.PI);
+}
+
+function smoothAngle(v) {
+  angleHistory.push(v);
+  if (angleHistory.length > SMOOTH_N) angleHistory.shift();
+  const arr = angleHistory;
+  // simple average
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
 function resizeCanvas() {
@@ -117,6 +149,8 @@ async function startCamera() {
   });
   video.srcObject = stream;
   await video.play();
+  // Wait a beat for dimensions
+  await new Promise(r => setTimeout(r, 300));
   resizeCanvas();
 }
 
@@ -126,9 +160,45 @@ async function loadModel() {
   await tf.ready();
   detector = await poseDetection.createDetector(
     poseDetection.SupportedModels.MoveNet,
-    { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+    { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THOROUGH }
   );
   setStatus('Ready');
+}
+
+// Get a padded bounding box around the person, based on previous keypoints
+function computeCropBox(kp, vw, vh) {
+  const valid = kp.filter(p => p.score > 0.2);
+  if (valid.length < 4) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of valid) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const padX = w * 0.35;
+  const padY = h * 0.35;
+  let x = Math.max(0, minX - padX);
+  let y = Math.max(0, minY - padY);
+  let cw = Math.min(vw - x, w + padX * 2);
+  let ch = Math.min(vh - y, h + padY * 2);
+  // Make square-ish for better model performance
+  const side = Math.max(cw, ch);
+  x = Math.max(0, Math.min(vw - side, x - (side - cw) / 2));
+  y = Math.max(0, Math.min(vh - side, y - (side - ch) / 2));
+  cw = Math.min(side, vw - x);
+  ch = Math.min(side, vh - y);
+  return { x, y, w: cw, h: ch };
+}
+
+// Convert a keypoint from crop-space back to video-space
+function unproject(kp, box) {
+  if (!box) return kp;
+  const x = box.x + (kp.x / 100) * box.w;
+  const y = box.y + (kp.y / 100) * box.h;
+  return { x, y, score: kp.score };
 }
 
 function toCanvasCoords(keypoints) {
@@ -146,12 +216,11 @@ function toCanvasCoords(keypoints) {
 function drawSkeleton(kp) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Bones
   ctx.strokeStyle = '#22c55e';
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 5;
   ctx.lineCap = 'round';
   for (const [a, b] of CONNECTIONS) {
-    if (kp[a].score > 0.3 && kp[b].score > 0.3) {
+    if (kp[a].score > MIN_SCORE && kp[b].score > MIN_SCORE) {
       ctx.beginPath();
       ctx.moveTo(kp[a].x, kp[a].y);
       ctx.lineTo(kp[b].x, kp[b].y);
@@ -159,46 +228,52 @@ function drawSkeleton(kp) {
     }
   }
 
-  // Joints
   ctx.fillStyle = '#fff';
   for (const p of kp) {
-    if (p.score > 0.3) {
+    if (p.score > MIN_SCORE) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
       ctx.fill();
     }
   }
+}
+
+function updateDebug(rawKp) {
+  let html = '';
+  for (let i = 0; i < rawKp.length; i++) {
+    const cls = rawKp[i].score > MIN_SCORE ? 'hit' : 'miss';
+    html += `<span class="${cls}">${KP_NAMES[i]}:${rawKp[i].score.toFixed(2)}</span>`;
+  }
+  debugEl.innerHTML = html;
 }
 
 function updateSquatLogic(rawKp) {
   const lh = rawKp[L_HIP], lk = rawKp[L_KNEE], la = rawKp[L_ANKLE];
   const rh = rawKp[R_HIP], rk = rawKp[R_KNEE], ra = rawKp[R_ANKLE];
 
-  const leftOk = lh.score > 0.3 && lk.score > 0.3 && la.score > 0.3;
-  const rightOk = rh.score > 0.3 && rk.score > 0.3 && ra.score > 0.3;
+  const leftOk = lh.score > MIN_SCORE && lk.score > MIN_SCORE && la.score > MIN_SCORE;
+  const rightOk = rh.score > MIN_SCORE && rk.score > MIN_SCORE && ra.score > MIN_SCORE;
 
-  let kneeAngle = null;
+  let rawAngle = null;
   if (leftOk && rightOk) {
-    const l = angle(lh, lk, la);
-    const r = angle(rh, rk, ra);
-    kneeAngle = (l + r) / 2;
+    rawAngle = (angle(lh, lk, la) + angle(rh, rk, ra)) / 2;
   } else if (leftOk) {
-    kneeAngle = angle(lh, lk, la);
+    rawAngle = angle(lh, lk, la);
   } else if (rightOk) {
-    kneeAngle = angle(rh, rk, ra);
+    rawAngle = angle(rh, rk, ra);
   }
 
-  if (kneeAngle === null) {
+  if (rawAngle === null) {
     angleEl.textContent = '--°';
     stateEl.textContent = '--';
     stateEl.className = '';
     return;
   }
 
-  angleEl.textContent = Math.round(kneeAngle) + '°';
+  const smoothed = smoothAngle(rawAngle);
+  angleEl.textContent = Math.round(smoothed) + '°';
 
-  if (kneeAngle > UP_ANGLE) {
-    // At the top
+  if (smoothed > UP_ANGLE) {
     if (phase === 'down') {
       reps++;
       repsEl.textContent = reps;
@@ -206,7 +281,7 @@ function updateSquatLogic(rawKp) {
     phase = 'up';
     stateEl.textContent = 'UP';
     stateEl.className = 'up';
-  } else if (kneeAngle < DOWN_ANGLE) {
+  } else if (smoothed < DOWN_ANGLE) {
     phase = 'down';
     stateEl.textContent = 'DOWN';
     stateEl.className = 'down';
@@ -216,16 +291,42 @@ function updateSquatLogic(rawKp) {
 async function loop() {
   if (!running) return;
   if (video.readyState >= 2 && detector) {
-    const poses = await detector.estimatePoses(video, { flipHorizontal: false });
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    let poses;
+    try {
+      if (lastBox) {
+        // Run on cropped region
+        poses = await detector.estimatePoses(video, {
+          cropAndResize: lastBox,
+          flipHorizontal: false
+        });
+        // Unproject keypoints from crop-space to video-space
+        if (poses.length > 0) {
+          poses[0].keypoints = poses[0].keypoints.map(kp => unproject(kp, lastBox));
+        }
+      } else {
+        poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      }
+    } catch (e) {
+      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+    }
+
     if (poses.length > 0) {
       const raw = poses[0].keypoints;
+      lastBox = computeCropBox(raw, vw, vh);
+
       const kp = toCanvasCoords(raw);
       drawSkeleton(kp);
       updateSquatLogic(raw);
+      updateDebug(raw);
+
       if (statusEl.textContent !== 'Tracking') setStatus('Tracking');
     } else {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       setStatus('No person detected');
+      lastBox = null;
     }
   }
   requestAnimationFrame(loop);
