@@ -1,630 +1,439 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!--
-  ══════════════════════════════════════════════════════════════════════
-  FORMCOACH — Solo Lifter Live Form Feedback & Rep Tracker (PWA)
-  Step 1 of 9: Camera + Skeleton + Bbox Crop + Frame Smoothing
-  Next Step: Step 2 — Squat rep counter + quality filter + fault detection
-  ══════════════════════════════════════════════════════════════════════
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>FormCoach</title>
+<meta name="theme-color" content="#000000" />
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<style>
+  :root {
+    --bg: #000; --surface: #121316; --border: #272a34;
+    --green: #22c55e; --green-dim: rgba(34,197,94,0.15);
+    --amber: #f59e0b; --red: #ef4444;
+    --text: #f3f4f6; --muted: #9ca3af;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+  #app { position: relative; width: 100vw; height: 100vh; max-width: 540px; margin: 0 auto; overflow: hidden; }
 
-  SUCCESS CRITERIA (Bake into product):
-  - 10 testers each complete 3 workouts in week 1 without reminders
-  - 30%+ return for a 2nd workout within 7 days
-  - Rep-count accuracy >90% on clean reps vs manual count
-  - Median session length >8 minutes
+  .top-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 30; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0)); pointer-events: none; }
+  .brand { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 9999px; background: rgba(18,19,22,0.9); border: 1px solid var(--border); font-size: 12px; font-weight: 700; color: #fff; pointer-events: auto; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); transition: background 0.2s; }
+  .dot.active { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.error { background: var(--red); }
+  .controls { display: flex; gap: 8px; pointer-events: auto; }
+  .icon-btn { min-width: 44px; min-height: 44px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: rgba(18,19,22,0.85); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(8px); }
+  .icon-btn:active { transform: scale(0.96); }
+  .icon-btn.active { border-color: var(--green); color: var(--green); background: var(--green-dim); }
 
-  KILL CRITERIA (Review metrics ruthlessly):
-  - <30% do 2nd workout -> fix retention before adding features
-  - Rep accuracy <80% after 2 iterations -> 2D pose alone insufficient
-  - 3 months from ship: <20 weekly active users -> shelve
-  - Any tester reports an injury -> pause, review, add safety rails
+  .viewport { position: relative; width: 100%; height: 100%; background: #050507; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  video#webcam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  video#webcam.mirrored { transform: scaleX(-1); }
+  canvas#pose-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+  canvas#pose-canvas.mirrored { transform: scaleX(-1); }
 
-  HONESTY & LIMITATIONS:
-  - 2D camera cannot detect rotational spinal torsion, bar roll, or 3D knee valgus.
-  - FormCoach tracks sagittal 2D plane angles (hip-knee-ankle, shoulder-hip-knee) accurately.
-  -->
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>FormCoach — Solo Lifter Live Form Feedback & Rep Tracker</title>
-  <meta name="description" content="Live form feedback and rep tracking for solo lifters with on-device pose estimation. No backend, 100% private in-browser on-device tracking." />
-  <meta property="og:title" content="FormCoach — Solo Lifter Live Form Feedback & Rep Tracker" />
-  <meta property="og:description" content="Live form feedback and rep tracking for solo lifters with on-device pose estimation." />
-  <meta property="og:type" content="website" />
-  <meta name="theme-color" content="#000000" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  .hud { position: absolute; inset: 0; z-index: 20; pointer-events: none; padding: 64px 16px 100px; display: flex; flex-direction: column; justify-content: space-between; }
+  .stats { align-self: flex-start; display: flex; flex-direction: column; gap: 4px; background: rgba(15,17,21,0.82); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; backdrop-filter: blur(10px); pointer-events: auto; max-width: 260px; }
+  .row { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; }
+  .lbl { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+  .val { font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; }
+  .val.good { color: var(--green); }
+  .val.warn { color: var(--amber); }
+  .val.bad { color: var(--red); }
 
-  <!-- TensorFlow.js 4.20 & MoveNet Pose Detection from jsDelivr CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+  .angles { align-self: flex-end; display: flex; flex-direction: column; gap: 6px; background: rgba(15,17,21,0.82); border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; backdrop-filter: blur(8px); pointer-events: auto; }
+  .angle-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+  .angle-val { font-weight: 800; font-size: 14px; color: var(--green); font-variant-numeric: tabular-nums; }
 
-  <style>
-    :root {
-      --bg-dark: #000000;
-      --surface-dark: #121316;
-      --surface-elevated: #1a1c22;
-      --border-subtle: #272a34;
-      --accent-green: #22c55e;
-      --accent-green-dim: rgba(34, 197, 94, 0.15);
-      --accent-warn: #f59e0b;
-      --accent-warn-dim: rgba(245, 158, 11, 0.15);
-      --accent-error: #ef4444;
-      --accent-error-dim: rgba(239, 68, 68, 0.15);
-      --text-main: #f3f4f6;
-      --text-muted: #9ca3af;
-      --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    }
+  .center { position: absolute; top: 22%; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+  .pill { display: inline-block; padding: 4px 14px; border-radius: 9999px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; background: rgba(34,197,94,0.16); border: 1px solid rgba(34,197,94,0.4); color: var(--green); margin-bottom: 6px; text-transform: uppercase; }
+  .rep-num { font-size: 80px; font-weight: 900; line-height: 1; letter-spacing: -2px; color: #fff; text-shadow: 0 4px 16px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums; }
+  .sub { font-size: 13px; font-weight: 600; color: var(--muted); }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      -webkit-tap-highlight-color: transparent;
-    }
+  .banner { position: absolute; bottom: 16px; left: 16px; right: 16px; z-index: 30; background: rgba(18,19,22,0.95); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); backdrop-filter: blur(12px); }
+  .banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .banner-title { font-size: 13px; font-weight: 700; color: #fff; }
+  .banner-desc { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cta { background: var(--green); color: #000; border: none; padding: 12px 18px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .cta:active { transform: scale(0.96); }
+  .cta:disabled { opacity: 0.5; }
 
-    body, html {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background-color: var(--bg-dark);
-      color: var(--text-main);
-      font-family: var(--font-stack);
-      line-height: 1.5;
-    }
-
-    #app-container {
-      position: relative;
-      width: 100vw;
-      height: 100vh;
-      max-width: 540px;
-      margin: 0 auto;
-      display: flex;
-      flex-direction: column;
-      background: var(--bg-dark);
-      overflow: hidden;
-    }
-
-    /* Top Bar */
-    .top-bar {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 30;
-      padding: 12px 16px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0) 100%);
-      pointer-events: none;
-    }
-
-    .brand-group {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      pointer-events: auto;
-    }
-
-    .brand-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 9999px;
-      background: rgba(18, 19, 22, 0.9);
-      border: 1px solid var(--border-subtle);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      color: #ffffff;
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--accent-warn);
-      transition: background-color 0.2s ease;
-    }
-    .status-dot.active {
-      background: var(--accent-green);
-      box-shadow: 0 0 8px var(--accent-green);
-    }
-    .status-dot.idle {
-      background: var(--accent-warn);
-    }
-    .status-dot.error {
-      background: var(--accent-error);
-    }
-
-    .controls-group {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      pointer-events: auto;
-    }
-
-    .icon-btn {
-      min-width: 44px;
-      min-height: 44px;
-      padding: 8px;
-      border-radius: 12px;
-      border: 1px solid var(--border-subtle);
-      background: rgba(18, 19, 22, 0.85);
-      color: var(--text-main);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: 600;
-      transition: all 0.2s ease;
-      backdrop-filter: blur(8px);
-    }
-    .icon-btn:hover {
-      background: var(--surface-elevated);
-      border-color: #3b4252;
-    }
-    .icon-btn:active {
-      transform: scale(0.96);
-    }
-    .icon-btn.active-toggle {
-      border-color: var(--accent-green);
-      color: var(--accent-green);
-      background: var(--accent-green-dim);
-    }
-
-    /* Video & Canvas Viewport */
-    .viewport-wrapper {
-      position: relative;
-      flex: 1;
-      width: 100%;
-      height: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #050507;
-      overflow: hidden;
-    }
-
-    video#webcam {
-      position: absolute;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      transform-origin: center center;
-    }
-    video#webcam.mirrored {
-      transform: scaleX(-1);
-    }
-
-    canvas#pose-canvas {
-      position: absolute;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      pointer-events: none;
-      transform-origin: center center;
-    }
-    canvas#pose-canvas.mirrored {
-      transform: scaleX(-1);
-    }
-
-    /* HUD Overlay */
-    .hud-layer {
-      position: absolute;
-      inset: 0;
-      z-index: 20;
-      pointer-events: none;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      padding: 64px 16px 88px 16px;
-    }
-
-    /* Quick Stats Card */
-    .stats-card {
-      align-self: flex-start;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      background: rgba(15, 17, 21, 0.82);
-      border: 1px solid var(--border-subtle);
-      border-radius: 12px;
-      padding: 10px 14px;
-      backdrop-filter: blur(10px);
-      pointer-events: auto;
-      max-width: 280px;
-    }
-
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      font-size: 12px;
-    }
-    .stat-label {
-      color: var(--text-muted);
-      text-transform: uppercase;
-      font-size: 11px;
-      letter-spacing: 0.5px;
-    }
-    .stat-val {
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      color: #ffffff;
-    }
-    .stat-val.good {
-      color: var(--accent-green);
-    }
-    .stat-val.warn {
-      color: var(--accent-warn);
-    }
-
-    /* Angle Callouts Overlay */
-    .angle-strip {
-      align-self: flex-end;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      background: rgba(15, 17, 21, 0.82);
-      border: 1px solid var(--border-subtle);
-      border-radius: 12px;
-      padding: 8px 12px;
-      backdrop-filter: blur(8px);
-      pointer-events: auto;
-    }
-    .angle-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      font-size: 12px;
-    }
-    .angle-val {
-      font-weight: 800;
-      font-size: 14px;
-      color: var(--accent-green);
-      font-variant-numeric: tabular-nums;
-    }
-
-    /* Target Rep Area */
-    .rep-display-container {
-      position: absolute;
-      top: 24%;
-      left: 0;
-      right: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      pointer-events: none;
-    }
-
-    .state-pill {
-      display: inline-block;
-      padding: 4px 14px;
-      border-radius: 9999px;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      background: rgba(34, 197, 94, 0.16);
-      border: 1px solid rgba(34, 197, 94, 0.4);
-      color: var(--accent-green);
-      margin-bottom: 6px;
-      text-transform: uppercase;
-    }
-
-    .rep-number {
-      font-size: 80px;
-      font-weight: 900;
-      line-height: 1;
-      letter-spacing: -2px;
-      color: #ffffff;
-      text-shadow: 0 4px 16px rgba(0, 0, 0, 0.9);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .rep-subtext {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-muted);
-      letter-spacing: 0.3px;
-    }
-
-    /* Step Banner at Bottom */
-    .step-banner {
-      position: absolute;
-      bottom: 16px;
-      left: 16px;
-      right: 16px;
-      z-index: 30;
-      background: rgba(18, 19, 22, 0.95);
-      border: 1px solid var(--border-subtle);
-      border-radius: 14px;
-      padding: 12px 16px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
-      backdrop-filter: blur(12px);
-    }
-
-    .banner-text {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .banner-title {
-      font-size: 13px;
-      font-weight: 700;
-      color: #ffffff;
-    }
-    .banner-desc {
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-
-    .pill-btn {
-      background: var(--accent-green);
-      color: #000000;
-      border: none;
-      padding: 10px 16px;
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 700;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: transform 0.15s ease, background-color 0.15s ease;
-      white-space: nowrap;
-    }
-    .pill-btn:hover {
-      background: #16a34a;
-    }
-    .pill-btn:active {
-      transform: scale(0.96);
-    }
-
-    /* Modal / Alert Dialog */
-    .modal-overlay {
-      position: absolute;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.85);
-      z-index: 50;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-      backdrop-filter: blur(6px);
-    }
-    .modal-card {
-      background: var(--surface-dark);
-      border: 1px solid var(--border-subtle);
-      border-radius: 16px;
-      padding: 24px;
-      width: 100%;
-      max-width: 400px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      text-align: center;
-    }
-    .modal-icon {
-      width: 48px;
-      height: 48px;
-      margin: 0 auto;
-      border-radius: 50%;
-      background: var(--accent-warn-dim);
-      color: var(--accent-warn);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 24px;
-    }
-    .modal-title {
-      font-size: 18px;
-      font-weight: 700;
-      color: #ffffff;
-    }
-    .modal-body {
-      font-size: 13px;
-      color: var(--text-muted);
-      line-height: 1.6;
-    }
-
-    /* Hidden utilities */
-    .hidden {
-      display: none !important;
-    }
-  </style>
+  .modal { position: absolute; inset: 0; background: rgba(0,0,0,0.85); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px; backdrop-filter: blur(6px); }
+  .modal.hidden { display: none; }
+  .modal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 16px; text-align: center; }
+  .modal-title { font-size: 18px; font-weight: 700; color: #fff; }
+  .modal-body { font-size: 13px; color: var(--muted); line-height: 1.6; }
+</style>
 </head>
 <body>
-  <div id="app-container">
-    <!-- Top Bar Navigation & Actions -->
-    <header class="top-bar">
-      <div class="brand-group">
-        <div class="brand-badge" id="brand-status" aria-label="Tracking Engine Status">
-          <span class="status-dot" id="status-indicator"></span>
-          <span>FormCoach</span>
-        </div>
+<div id="app">
+  <header class="top-bar">
+    <div class="brand"><span class="dot" id="dot"></span><span>FormCoach</span></div>
+    <div class="controls">
+      <button class="icon-btn" id="btn-flip" title="Switch camera">🔄</button>
+      <button class="icon-btn" id="btn-debug" title="Toggle debug">⌗</button>
+      <button class="icon-btn" id="btn-pause" title="Pause">⏸</button>
+    </div>
+  </header>
+
+  <main class="viewport" id="viewport">
+    <video id="webcam" playsinline muted autoplay></video>
+    <canvas id="pose-canvas"></canvas>
+
+    <div class="hud">
+      <div class="stats">
+        <div class="row"><span class="lbl">Inference</span><span class="val good" id="s-fps">-- fps</span></div>
+        <div class="row"><span class="lbl">Latency</span><span class="val" id="s-lat">-- ms</span></div>
+        <div class="row"><span class="lbl">Confidence</span><span class="val" id="s-conf">--</span></div>
+        <div class="row"><span class="lbl">Bbox Crop</span><span class="val" id="s-crop">Inactive</span></div>
+        <div class="row"><span class="lbl">Battery Guard</span><span class="val" id="s-batt">Active</span></div>
       </div>
 
-      <div class="controls-group">
-        <button id="btn-flip" class="icon-btn" title="Switch Camera" aria-label="Switch Camera (Front or Rear)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 10c0-4.418-3.582-8-8-8s-8 3.582-8 8c0 2.21 0.895 4.21 2.343 5.657L4 20h6v-6l-2.343 2.343A5.978 5.978 0 0 1 6 10c0-3.314 2.686-6 6-6s6 2.686 6 6c0 1.657-0.672 3.157-1.757 4.243l1.414 1.414C19.328 14.328 20 12.27 20 10z"/>
-          </svg>
-        </button>
-        <button id="btn-debug" class="icon-btn" title="Toggle Debug Grid" aria-label="Toggle Debug Grid">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <line x1="3" y1="9" x2="21" y2="9"></line>
-            <line x1="3" y1="15" x2="21" y2="15"></line>
-            <line x1="9" y1="3" x2="9" y2="21"></line>
-            <line x1="15" y1="3" x2="15" y2="21"></line>
-          </svg>
-        </button>
-        <button id="btn-pause" class="icon-btn" title="Pause Tracking" aria-label="Pause Tracking">
-          <svg id="icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="6" y="4" width="4" height="16"></rect>
-            <rect x="14" y="4" width="4" height="16"></rect>
-          </svg>
-        </button>
-      </div>
-    </header>
-
-    <!-- Camera Viewport & Real-Time Skeleton Canvas -->
-    <main class="viewport-wrapper" id="viewport">
-      <video id="webcam" playsinline muted autoplay></video>
-      <canvas id="pose-canvas"></canvas>
-
-      <!-- Heads-Up Display -->
-      <div class="hud-layer">
-        <!-- Live Performance & Bbox Telemetry -->
-        <div class="stats-card" id="telemetry-card">
-          <div class="stat-row">
-            <span class="stat-label">Inference</span>
-            <span class="stat-val good" id="stat-fps">-- fps</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Latency</span>
-            <span class="stat-val" id="stat-latency">-- ms</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Confidence</span>
-            <span class="stat-val" id="stat-confidence">--</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Bbox Crop</span>
-            <span class="stat-val" id="stat-crop">Inactive</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Battery Guard</span>
-            <span class="stat-val" id="stat-battery">Active</span>
-          </div>
-        </div>
-
-        <!-- Joint Angle Callout (Rolling 5-frame smoothed) -->
-        <div class="angle-strip" id="angle-card">
-          <div class="angle-item">
-            <span class="stat-label">Knee Flexion</span>
-            <span class="angle-val" id="val-knee-angle">--°</span>
-          </div>
-          <div class="angle-item">
-            <span class="stat-label">Hip Incline</span>
-            <span class="angle-val" id="val-hip-angle">--°</span>
-          </div>
-          <div class="angle-item">
-            <span class="stat-label">Elbow Angle</span>
-            <span class="angle-val" id="val-elbow-angle">--°</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Centered Rep / Status Display -->
-      <div class="rep-display-container">
-        <span class="state-pill" id="pose-state-pill">Step 1 — Vision Ready</span>
-        <div class="rep-number" id="rep-counter">0</div>
-        <div class="rep-subtext" id="rep-subtext">Stand 6–8ft away in side profile</div>
-      </div>
-    </main>
-
-    <!-- Bottom Action & Test-Gate Banner -->
-    <footer class="step-banner">
-      <div class="banner-text">
-        <div class="banner-title">Step 1 Gate: Pose & Skeleton Calibration</div>
-        <div class="banner-desc">MoveNet Thorough @ 15fps with rolling 5-frame smoothing</div>
-      </div>
-      <button class="pill-btn" id="btn-action">
-        <span>Test Feed</span>
-      </button>
-    </footer>
-
-    <!-- Error / Fallback Modal -->
-    <div class="modal-overlay hidden" id="modal-dialog">
-      <div class="modal-card">
-        <div class="modal-icon" id="modal-icon">⚠️</div>
-        <h2 class="modal-title" id="modal-title">Camera Permission Needed</h2>
-        <p class="modal-body" id="modal-body">
-          FormCoach needs camera access to analyze joint angles in real time. All processing happens 100% on your device—no video ever leaves your phone.
-        </p>
-        <button class="pill-btn" style="justify-content: center;" id="modal-btn-retry">Allow Camera Access</button>
+      <div class="angles">
+        <div class="angle-row"><span class="lbl">Knee</span><span class="angle-val" id="a-knee">--°</span></div>
+        <div class="angle-row"><span class="lbl">Hip</span><span class="angle-val" id="a-hip">--°</span></div>
+        <div class="angle-row"><span class="lbl">Elbow</span><span class="angle-val" id="a-elbow">--°</span></div>
       </div>
     </div>
+
+    <div class="center">
+      <span class="pill" id="state-pill">Step 1 — Vision Ready</span>
+      <div class="rep-num" id="rep-counter">0</div>
+      <div class="sub" id="subtext">Tap Test Feed to start camera</div>
+    </div>
+  </main>
+
+  <footer class="banner">
+    <div class="banner-text">
+      <div class="banner-title">Step 1 Gate: Pose & Skeleton Calibration</div>
+      <div class="banner-desc" id="banner-desc">MoveNet Thorough @ 15fps</div>
+    </div>
+    <button class="cta" id="btn-action">Test Feed</button>
+  </footer>
+
+  <div class="modal hidden" id="modal">
+    <div class="modal-card">
+      <h2 class="modal-title" id="modal-title">Camera Permission Needed</h2>
+      <p class="modal-body" id="modal-body">FormCoach needs camera access. All processing happens on your device — no video ever leaves your phone.</p>
+      <button class="cta" id="modal-btn" style="justify-content:center;">Try Again</button>
+    </div>
   </div>
+</div>
 
-  <script>
-    /**
-     * FormCoach — Step 1: Camera + Skeleton + Bbox Crop + Frame Smoothing
-     * Built strictly for Chrome on Android / Mobile & Desktop Browsers.
-     * Single-camera 2D kinematics with MoveNet SinglePose.Thorough.
-     */
-    (function () {
-      'use strict';
+<script>
+(function () {
+  'use strict';
 
-      // ── DOM References ──
-      const video = document.getElementById('webcam');
-      const canvas = document.getElementById('pose-canvas');
-      const ctx = canvas.getContext('2d');
-      const btnFlip = document.getElementById('btn-flip');
-      const btnDebug = document.getElementById('btn-debug');
-      const btnPause = document.getElementById('btn-pause');
-      const btnAction = document.getElementById('btn-action');
-      const statusIndicator = document.getElementById('status-indicator');
-      const statFps = document.getElementById('stat-fps');
-      const statLatency = document.getElementById('stat-latency');
-      const statConfidence = document.getElementById('stat-confidence');
-      const statCrop = document.getElementById('stat-crop');
-      const statBattery = document.getElementById('stat-battery');
-      const valKneeAngle = document.getElementById('val-knee-angle');
-      const valHipAngle = document.getElementById('val-hip-angle');
-      const valElbowAngle = document.getElementById('val-elbow-angle');
-      const poseStatePill = document.getElementById('pose-state-pill');
-      const repSubtext = document.getElementById('rep-subtext');
-      const modalDialog = document.getElementById('modal-dialog');
-      const modalTitle = document.getElementById('modal-title');
-      const modalBody = document.getElementById('modal-body');
-      const modalBtnRetry = document.getElementById('modal-btn-retry');
+  const video = document.getElementById('webcam');
+  const canvas = document.getElementById('pose-canvas');
+  const ctx = canvas.getContext('2d');
+  const btnFlip = document.getElementById('btn-flip');
+  const btnDebug = document.getElementById('btn-debug');
+  const btnPause = document.getElementById('btn-pause');
+  const btnAction = document.getElementById('btn-action');
+  const dot = document.getElementById('dot');
+  const sFps = document.getElementById('s-fps');
+  const sLat = document.getElementById('s-lat');
+  const sConf = document.getElementById('s-conf');
+  const sCrop = document.getElementById('s-crop');
+  const sBatt = document.getElementById('s-batt');
+  const aKnee = document.getElementById('a-knee');
+  const aHip = document.getElementById('a-hip');
+  const aElbow = document.getElementById('a-elbow');
+  const statePill = document.getElementById('state-pill');
+  const subtext = document.getElementById('subtext');
+  const bannerDesc = document.getElementById('banner-desc');
+  const modal = document.getElementById('modal');
+  const modalTitle = document.getElementById('modal-title');
+  const modalBody = document.getElementById('modal-body');
+  const modalBtn = document.getElementById('modal-btn');
 
-      // ── Configuration & Tuning ──
-      const CONFIDENCE_THRESHOLD = 0.35;
-      const TARGET_FPS = 15;
-      const TARGET_INTERVAL_MS = 1000 / TARGET_FPS; // ~66ms per inference frame
-      const BATTERY_GUARD_DELTA_PX = 3.0; // stationary threshold
-      const BATTERY_GUARD_TIME_MS = 2000; // 2 seconds motionless
-      const BATTERY_GUARD_SLEEP_MS = 500; // sleep 500ms when idle
+  // ── Config ──
+  const CONF_THRESHOLD = 0.35;
+  const TARGET_FPS = 15;
+  const TARGET_INTERVAL_MS = 1000 / TARGET_FPS;
+  const STATIONARY_PX = 3.0;
+  const STATIONARY_MS = 2000;
+  const SLEEP_MS = 500;
+  const SMOOTH_N = 5;
 
-      // MoveNet 17 Keypoint Indices
-      const KP = {
-        NOSE: 0,
-        LEFT_EYE: 1,
-        RIGHT_EYE: 2,
-        LEFT_EAR: 3,
-        RIGHT_EAR: 4,
-        LEFT_SHOULDER: 5,
-        RIGHT_SHOULDER: 6,
-        LEFT_ELBOW: 7,
-        RIGHT_ELBOW: 8,
-        LEFT_WRIST: 9,
-        RIGHT_WRIST: 10,
-        LEFT_HIP: 11,
-        RIGHT_HIP: 12,
-        LEFT_KNEE: 13,
-        RIGHT_KNEE: 14,
-        LEFT_ANKLE: 15,
-        RIGHT_ANKLE: 16
-      };
+  // ── MoveNet keypoints ──
+  const KP = { NOSE:0, LEYE:1, REYE:2, LEAR:3, REAR:4, LSHO:5, RSHO:6, LELB:7, RELB:8, LWRI:9, RWRI:10, LHIP:11, RHIP:12, LKNE:13, RKNE:14, LANK:15, RANK:16 };
+  const SKELETON = [
+    [KP.NOSE,KP.LEYE],[KP.LEYE,KP.LEAR],[KP.NOSE,KP.REYE],[KP.REYE,KP.REAR],
+    [KP.LSHO,KP.RSHO],[KP.LSHO,KP.LELB],[KP.LELB,KP.LWRI],[KP.RSHO,KP.RELB],[KP.RELB,KP.RWRI],
+    [KP.LSHO,KP.LHIP],[KP.RSHO,KP.RHIP],[KP.LHIP,KP.RHIP],
+    [KP.LHIP,KP.LKNE],[KP.LKNE,KP.LANK],[KP.RHIP,KP.RKNE],[KP.RKNE,KP.RANK]
+  ];
 
-      // Skeleton Connection Pairs
-      const SKELETON_PAIRS = [
-        [KP.NOSE, KP.LEFT_EYE], [KP.LEFT_EYE, KP.LEFT_EAR],
-        [KP.NOSE, KP.RIGHT_EYE], [KP.RIGHT_EYE, KP.RIGHT_EAR],
-        [KP.LEFT_SHOULDER, KP.RIGHT_SHOULDER],
-        [KP.LEFT_SHOULDER, KP.LEFT_ELBO
+  // ── State ──
+  let detector = null;
+  let stream = null;
+  let running = false;
+  let paused = false;
+  let debugOn = false;
+  let facingMode = 'user'; // 'user' = front, 'environment' = rear
+  let lastBox = null;      // {x,y,w,h} in video pixel space
+  let lastKeypoints = null;
+  let stationaryStart = null;
+  let lastInferenceTs = 0;
+  let fpsBuffer = [];
+  let lastFrameTs = performance.now();
+  const smooth = { knee: [], hip: [], elbow: [] };
+
+  // ── Helpers ──
+  function setDot(state) {
+    dot.className = 'dot' + (state === 'active' ? ' active' : state === 'error' ? ' error' : '');
+  }
+  function showModal(title, body) {
+    modalTitle.textContent = title;
+    modalBody.textContent = body;
+    modal.classList.remove('hidden');
+  }
+  function hideModal() { modal.classList.add('hidden'); }
+
+  function angleBetween(a, b, c) {
+    if (!a || !b || !c) return null;
+    if (a.score < CONF_THRESHOLD || b.score < CONF_THRESHOLD || c.score < CONF_THRESHOLD) return null;
+    const abx = a.x - b.x, aby = a.y - b.y;
+    const cbx = c.x - b.x, cby = c.y - b.y;
+    const dot = abx * cbx + aby * cby;
+    const magA = Math.hypot(abx, aby);
+    const magC = Math.hypot(cbx, cby);
+    if (magA === 0 || magC === 0) return null;
+    const cos = Math.max(-1, Math.min(1, dot / (magA * magC)));
+    return Math.acos(cos) * 180 / Math.PI;
+  }
+
+  function pushSmooth(key, val) {
+    const arr = smooth[key];
+    if (val == null) return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+    arr.push(val);
+    if (arr.length > SMOOTH_N) arr.shift();
+    return arr.reduce((a,b)=>a+b,0) / arr.length;
+  }
+
+  // ── Camera ──
+  async function startCamera() {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      // Wait for dimensions
+      await new Promise(r => {
+        if (video.videoWidth) return r();
+        video.onloadedmetadata = () => r();
+      });
+      resizeCanvas();
+      applyMirror();
+      return true;
+    } catch (err) {
+      console.error('Camera error:', err);
+      return false;
+    }
+  }
+
+  function resizeCanvas() {
+    canvas.width = video.videoWidth || window.innerWidth;
+    canvas.height = video.videoHeight || window.innerHeight;
+  }
+  window.addEventListener('resize', resizeCanvas);
+
+  function applyMirror() {
+    const mirror = facingMode === 'user';
+    video.classList.toggle('mirrored', mirror);
+    canvas.classList.toggle('mirrored', mirror);
+  }
+
+  // ── Model ──
+  async function loadModel() {
+    if (detector) return true;
+    try {
+      bannerDesc.textContent = 'Loading model...';
+      await tf.setBackend('webgl');
+      await tf.ready();
+      detector = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet,
+        { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THOROUGH }
+      );
+      bannerDesc.textContent = 'MoveNet Thorough @ 15fps';
+      return true;
+    } catch (err) {
+      console.error('Model error:', err);
+      return false;
+    }
+  }
+
+  // ── Bbox crop ──
+  function computeCropBox(kp, vw, vh) {
+    const valid = kp.filter(p => p.score > 0.25);
+    if (valid.length < 4) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of valid) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const padX = w * 0.25, padY = h * 0.25;
+    let x = Math.max(0, minX - padX);
+    let y = Math.max(0, minY - padY);
+    let cw = Math.min(vw - x, w + padX * 2);
+    let ch = Math.min(vh - y, h + padY * 2);
+    const side = Math.max(cw, ch);
+    x = Math.max(0, Math.min(vw - side, x - (side - cw) / 2));
+    y = Math.max(0, Math.min(vh - side, y - (side - ch) / 2));
+    return { x, y, w: Math.min(side, vw - x), h: Math.min(side, vh - y) };
+  }
+
+  // ── Drawing ──
+  function drawSkeleton(kp) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height;
+    const vw = video.videoWidth || w, vh = video.videoHeight || h;
+    const pts = kp.map(p => ({ x: p.x * (w / vw), y: p.y * (h / vh), score: p.score }));
+
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 5;
+    for (const [a, b] of SKELETON) {
+      const pa = pts[a], pb = pts[b];
+      if (pa.score > CONF_THRESHOLD && pb.score > CONF_THRESHOLD) {
+        ctx.strokeStyle = '#22c55e';
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+      }
+    }
+    for (const p of pts) {
+      if (p.score > CONF_THRESHOLD) {
+        ctx.fillStyle = p.score > 0.6 ? '#ffffff' : '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (debugOn) {
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#0f0';
+      pts.forEach((p, i) => {
+        if (p.score > 0.2) ctx.fillText(i, p.x + 8, p.y - 4);
+      });
+    }
+  }
+
+  // ── Main loop ──
+  async function loop() {
+    if (!running) return;
+    requestAnimationFrame(loop);
+
+    if (paused || !detector || video.readyState < 2) return;
+
+    const now = performance.now();
+    if (now - lastInferenceTs < TARGET_INTERVAL_MS) return;
+
+    // Battery guard: stationary detection
+    if (stationaryStart && now - stationaryStart > STATIONARY_MS) {
+      if (now - lastInferenceTs < SLEEP_MS) return;
+      sBatt.textContent = 'Sleeping';
+      sBatt.className = 'val warn';
+    } else {
+      sBatt.textContent = 'Active';
+      sBatt.className = 'val good';
+    }
+
+    const t0 = performance.now();
+    lastInferenceTs = now;
+
+    try {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      let poses;
+      if (lastBox) {
+        poses = await detector.estimatePoses(video, {
+          cropAndResize: lastBox,
+          flipHorizontal: false
+        });
+        if (poses.length && poses[0].keypoints) {
+          // Unproject from crop-space
+          poses[0].keypoints = poses[0].keypoints.map(p => ({
+            x: lastBox.x + (p.x / vw) * lastBox.w,
+            y: lastBox.y + (p.y / vh) * lastBox.h,
+            score: p.score
+          }));
+        }
+      } else {
+        poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      }
+
+      const t1 = performance.now();
+      const latency = t1 - t0;
+
+      if (poses && poses.length > 0) {
+        const kp = poses[0].keypoints;
+        lastKeypoints = kp;
+        lastBox = computeCropBox(kp, vw, vh);
+        sCrop.textContent = lastBox ? 'Active' : 'Inactive';
+        sCrop.className = 'val ' + (lastBox ? 'good' : 'warn');
+
+        // Confidence
+        const avgConf = kp.reduce((s, p) => s + p.score, 0) / kp.length;
+        sConf.textContent = avgConf.toFixed(2);
+        sConf.className = 'val ' + (avgConf > 0.6 ? 'good' : avgConf > 0.4 ? 'warn' : 'bad');
+
+        // Stationary detection
+        if (kp[KP.LHIP].score > 0.3) {
+          const hipX = (kp[KP.LHIP].x + kp[KP.RHIP].x) / 2;
+          const hipY = (kp[KP.LHIP].y + kp[KP.RHIP].y) / 2;
+          if (loop._prevHip) {
+            const d = Math.hypot(hipX - loop._prevHip.x, hipY - loop._prevHip.y);
+            if (d < STATIONARY_PX) {
+              if (!stationaryStart) stationaryStart = now;
+            } else {
+              stationaryStart = null;
+            }
+          }
+          loop._prevHip = { x: hipX, y: hipY };
+        }
+
+        drawSkeleton(kp);
+
+        // Angles
+        const kneeL = angleBetween(kp[KP.LHIP], kp[KP.LKNE], kp[KP.LANK]);
+        const kneeR = angleBetween(kp[KP.RHIP], kp[KP.RKNE], kp[KP.RANK]);
+        const knee = (kneeL != null && kneeR != null) ? (kneeL + kneeR) / 2 : (kneeL ?? kneeR);
+        const hip = angleBetween(kp[KP.LSHO], kp[KP.LHIP], kp[KP.LKNE]);
+        const elbowL = angleBetween(kp[KP.LSHO], kp[KP.LELB], kp[KP.LWRI]);
+        const elbowR = angleBetween(kp[KP.RSHO], kp[KP.RELB], kp[KP.RWRI]);
+        const elbow = (elbowL != null && elbowR != null) ? (elbowL + elbowR) / 2 : (elbowL ?? elbowR);
+
+        const sKnee = pushSmooth('knee', knee);
+        const sHip = pushSmooth('hip', hip);
+        const sElbow = pushSmooth('elbow', elbow);
+
+        aKnee.textContent = sKnee != null ? Math.round(sKnee) + '°' : '--°';
+        aHip.textContent = sHip != null ? Math.round(sHip) + '°' : '--°';
+        aElbow.textContent = sElbow != null ? Math.round(sElbow) + '°' : '--°';
+
+        // FPS
+        const dt = now - lastFrameTs;
+        lastFrameTs = now;
+        if (dt > 0) {
+          fpsBuffer.push(1000 / dt);
+          if (fpsBuffer.length > 10) fpsBuffer.shift();
+          const fps = fpsBuffer.reduce((a,b)=>a+b,0) / fpsBuffer.length;
+          sFps.textContent = Math.round
