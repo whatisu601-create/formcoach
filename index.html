@@ -1,26 +1,439 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Camera Test</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>FormCoach</title>
+<meta name="theme-color" content="#000000" />
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<style>
+  :root {
+    --bg: #000; --surface: #121316; --border: #272a34;
+    --green: #22c55e; --green-dim: rgba(34,197,94,0.15);
+    --amber: #f59e0b; --red: #ef4444;
+    --text: #f3f4f6; --muted: #9ca3af;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+  #app { position: relative; width: 100vw; height: 100vh; max-width: 540px; margin: 0 auto; overflow: hidden; }
+
+  .top-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 30; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0)); pointer-events: none; }
+  .brand { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 9999px; background: rgba(18,19,22,0.9); border: 1px solid var(--border); font-size: 12px; font-weight: 700; color: #fff; pointer-events: auto; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); transition: background 0.2s; }
+  .dot.active { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.error { background: var(--red); }
+  .controls { display: flex; gap: 8px; pointer-events: auto; }
+  .icon-btn { min-width: 44px; min-height: 44px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: rgba(18,19,22,0.85); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(8px); }
+  .icon-btn:active { transform: scale(0.96); }
+  .icon-btn.active { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+
+  .viewport { position: relative; width: 100%; height: 100%; background: #050507; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  video#webcam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  video#webcam.mirrored { transform: scaleX(-1); }
+  canvas#pose-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+  canvas#pose-canvas.mirrored { transform: scaleX(-1); }
+
+  .hud { position: absolute; inset: 0; z-index: 20; pointer-events: none; padding: 64px 16px 100px; display: flex; flex-direction: column; justify-content: space-between; }
+  .stats { align-self: flex-start; display: flex; flex-direction: column; gap: 4px; background: rgba(15,17,21,0.82); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; backdrop-filter: blur(10px); pointer-events: auto; max-width: 260px; }
+  .row { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; }
+  .lbl { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+  .val { font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; }
+  .val.good { color: var(--green); }
+  .val.warn { color: var(--amber); }
+  .val.bad { color: var(--red); }
+
+  .angles { align-self: flex-end; display: flex; flex-direction: column; gap: 6px; background: rgba(15,17,21,0.82); border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; backdrop-filter: blur(8px); pointer-events: auto; }
+  .angle-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+  .angle-val { font-weight: 800; font-size: 14px; color: var(--green); font-variant-numeric: tabular-nums; }
+
+  .center { position: absolute; top: 22%; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+  .pill { display: inline-block; padding: 4px 14px; border-radius: 9999px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; background: rgba(34,197,94,0.16); border: 1px solid rgba(34,197,94,0.4); color: var(--green); margin-bottom: 6px; text-transform: uppercase; }
+  .rep-num { font-size: 80px; font-weight: 900; line-height: 1; letter-spacing: -2px; color: #fff; text-shadow: 0 4px 16px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums; }
+  .sub { font-size: 13px; font-weight: 600; color: var(--muted); }
+
+  .banner { position: absolute; bottom: 16px; left: 16px; right: 16px; z-index: 30; background: rgba(18,19,22,0.95); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); backdrop-filter: blur(12px); }
+  .banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .banner-title { font-size: 13px; font-weight: 700; color: #fff; }
+  .banner-desc { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cta { background: var(--green); color: #000; border: none; padding: 12px 18px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .cta:active { transform: scale(0.96); }
+  .cta:disabled { opacity: 0.5; }
+
+  .modal { position: absolute; inset: 0; background: rgba(0,0,0,0.85); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px; backdrop-filter: blur(6px); }
+  .modal.hidden { display: none; }
+  .modal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 16px; text-align: center; }
+  .modal-title { font-size: 18px; font-weight: 700; color: #fff; }
+  .modal-body { font-size: 13px; color: var(--muted); line-height: 1.6; }
+</style>
 </head>
-<body style="background:#000;color:#fff;font-family:sans-serif;padding:20px;">
-  <h1>Camera Test</h1>
-  <p id="status">Tap the button</p>
-  <button id="btn" style="font-size:20px;padding:20px 40px;background:#22c55e;border:none;border-radius:10px;font-weight:bold;">START CAMERA</button>
-  <video id="video" playsinline autoplay muted style="width:100%;margin-top:20px;border-radius:10px;"></video>
+<body>
+<div id="app">
+  <header class="top-bar">
+    <div class="brand"><span class="dot" id="dot"></span><span>FormCoach</span></div>
+    <div class="controls">
+      <button class="icon-btn" id="btn-flip" title="Switch camera">🔄</button>
+      <button class="icon-btn" id="btn-debug" title="Toggle debug">⌗</button>
+      <button class="icon-btn" id="btn-pause" title="Pause">⏸</button>
+    </div>
+  </header>
+
+  <main class="viewport" id="viewport">
+    <video id="webcam" playsinline muted autoplay></video>
+    <canvas id="pose-canvas"></canvas>
+
+    <div class="hud">
+      <div class="stats">
+        <div class="row"><span class="lbl">Inference</span><span class="val good" id="s-fps">-- fps</span></div>
+        <div class="row"><span class="lbl">Latency</span><span class="val" id="s-lat">-- ms</span></div>
+        <div class="row"><span class="lbl">Confidence</span><span class="val" id="s-conf">--</span></div>
+        <div class="row"><span class="lbl">Bbox Crop</span><span class="val" id="s-crop">Inactive</span></div>
+        <div class="row"><span class="lbl">Battery Guard</span><span class="val" id="s-batt">Active</span></div>
+      </div>
+
+      <div class="angles">
+        <div class="angle-row"><span class="lbl">Knee</span><span class="angle-val" id="a-knee">--°</span></div>
+        <div class="angle-row"><span class="lbl">Hip</span><span class="angle-val" id="a-hip">--°</span></div>
+        <div class="angle-row"><span class="lbl">Elbow</span><span class="angle-val" id="a-elbow">--°</span></div>
+      </div>
+    </div>
+
+    <div class="center">
+      <span class="pill" id="state-pill">Step 1 — Vision Ready</span>
+      <div class="rep-num" id="rep-counter">0</div>
+      <div class="sub" id="subtext">Tap Test Feed to start camera</div>
+    </div>
+  </main>
+
+  <footer class="banner">
+    <div class="banner-text">
+      <div class="banner-title">Step 1 Gate: Pose & Skeleton Calibration</div>
+      <div class="banner-desc" id="banner-desc">MoveNet Thorough @ 15fps</div>
+    </div>
+    <button class="cta" id="btn-action">Test Feed</button>
+  </footer>
+
+  <div class="modal hidden" id="modal">
+    <div class="modal-card">
+      <h2 class="modal-title" id="modal-title">Camera Permission Needed</h2>
+      <p class="modal-body" id="modal-body">FormCoach needs camera access. All processing happens on your device — no video ever leaves your phone.</p>
+      <button class="cta" id="modal-btn" style="justify-content:center;">Try Again</button>
+    </div>
+  </div>
+</div>
 
 <script>
-document.getElementById('btn').addEventListener('click', async function() {
-  document.getElementById('status').textContent = 'Button clicked. Asking camera...';
-  try {
-    var stream = await navigator.mediaDevices.getUserMedia({ video: true });
-    document.getElementById('video').srcObject = stream;
-    document.getElementById('status').textContent = 'Camera is ON';
-  } catch (err) {
-    document.getElementById('status').textContent = 'ERROR: ' + err.message;
+(function () {
+  'use strict';
+
+  const video = document.getElementById('webcam');
+  const canvas = document.getElementById('pose-canvas');
+  const ctx = canvas.getContext('2d');
+  const btnFlip = document.getElementById('btn-flip');
+  const btnDebug = document.getElementById('btn-debug');
+  const btnPause = document.getElementById('btn-pause');
+  const btnAction = document.getElementById('btn-action');
+  const dot = document.getElementById('dot');
+  const sFps = document.getElementById('s-fps');
+  const sLat = document.getElementById('s-lat');
+  const sConf = document.getElementById('s-conf');
+  const sCrop = document.getElementById('s-crop');
+  const sBatt = document.getElementById('s-batt');
+  const aKnee = document.getElementById('a-knee');
+  const aHip = document.getElementById('a-hip');
+  const aElbow = document.getElementById('a-elbow');
+  const statePill = document.getElementById('state-pill');
+  const subtext = document.getElementById('subtext');
+  const bannerDesc = document.getElementById('banner-desc');
+  const modal = document.getElementById('modal');
+  const modalTitle = document.getElementById('modal-title');
+  const modalBody = document.getElementById('modal-body');
+  const modalBtn = document.getElementById('modal-btn');
+
+  // ── Config ──
+  const CONF_THRESHOLD = 0.35;
+  const TARGET_FPS = 15;
+  const TARGET_INTERVAL_MS = 1000 / TARGET_FPS;
+  const STATIONARY_PX = 3.0;
+  const STATIONARY_MS = 2000;
+  const SLEEP_MS = 500;
+  const SMOOTH_N = 5;
+
+  // ── MoveNet keypoints ──
+  const KP = { NOSE:0, LEYE:1, REYE:2, LEAR:3, REAR:4, LSHO:5, RSHO:6, LELB:7, RELB:8, LWRI:9, RWRI:10, LHIP:11, RHIP:12, LKNE:13, RKNE:14, LANK:15, RANK:16 };
+  const SKELETON = [
+    [KP.NOSE,KP.LEYE],[KP.LEYE,KP.LEAR],[KP.NOSE,KP.REYE],[KP.REYE,KP.REAR],
+    [KP.LSHO,KP.RSHO],[KP.LSHO,KP.LELB],[KP.LELB,KP.LWRI],[KP.RSHO,KP.RELB],[KP.RELB,KP.RWRI],
+    [KP.LSHO,KP.LHIP],[KP.RSHO,KP.RHIP],[KP.LHIP,KP.RHIP],
+    [KP.LHIP,KP.LKNE],[KP.LKNE,KP.LANK],[KP.RHIP,KP.RKNE],[KP.RKNE,KP.RANK]
+  ];
+
+  // ── State ──
+  let detector = null;
+  let stream = null;
+  let running = false;
+  let paused = false;
+  let debugOn = false;
+  let facingMode = 'user'; // 'user' = front, 'environment' = rear
+  let lastBox = null;      // {x,y,w,h} in video pixel space
+  let lastKeypoints = null;
+  let stationaryStart = null;
+  let lastInferenceTs = 0;
+  let fpsBuffer = [];
+  let lastFrameTs = performance.now();
+  const smooth = { knee: [], hip: [], elbow: [] };
+
+  // ── Helpers ──
+  function setDot(state) {
+    dot.className = 'dot' + (state === 'active' ? ' active' : state === 'error' ? ' error' : '');
   }
-});
-</script>
-</body>
-</html>
+  function showModal(title, body) {
+    modalTitle.textContent = title;
+    modalBody.textContent = body;
+    modal.classList.remove('hidden');
+  }
+  function hideModal() { modal.classList.add('hidden'); }
+
+  function angleBetween(a, b, c) {
+    if (!a || !b || !c) return null;
+    if (a.score < CONF_THRESHOLD || b.score < CONF_THRESHOLD || c.score < CONF_THRESHOLD) return null;
+    const abx = a.x - b.x, aby = a.y - b.y;
+    const cbx = c.x - b.x, cby = c.y - b.y;
+    const dot = abx * cbx + aby * cby;
+    const magA = Math.hypot(abx, aby);
+    const magC = Math.hypot(cbx, cby);
+    if (magA === 0 || magC === 0) return null;
+    const cos = Math.max(-1, Math.min(1, dot / (magA * magC)));
+    return Math.acos(cos) * 180 / Math.PI;
+  }
+
+  function pushSmooth(key, val) {
+    const arr = smooth[key];
+    if (val == null) return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+    arr.push(val);
+    if (arr.length > SMOOTH_N) arr.shift();
+    return arr.reduce((a,b)=>a+b,0) / arr.length;
+  }
+
+  // ── Camera ──
+  async function startCamera() {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      // Wait for dimensions
+      await new Promise(r => {
+        if (video.videoWidth) return r();
+        video.onloadedmetadata = () => r();
+      });
+      resizeCanvas();
+      applyMirror();
+      return true;
+    } catch (err) {
+      console.error('Camera error:', err);
+      return false;
+    }
+  }
+
+  function resizeCanvas() {
+    canvas.width = video.videoWidth || window.innerWidth;
+    canvas.height = video.videoHeight || window.innerHeight;
+  }
+  window.addEventListener('resize', resizeCanvas);
+
+  function applyMirror() {
+    const mirror = facingMode === 'user';
+    video.classList.toggle('mirrored', mirror);
+    canvas.classList.toggle('mirrored', mirror);
+  }
+
+  // ── Model ──
+  async function loadModel() {
+    if (detector) return true;
+    try {
+      bannerDesc.textContent = 'Loading model...';
+      await tf.setBackend('webgl');
+      await tf.ready();
+      detector = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet,
+        { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THOROUGH }
+      );
+      bannerDesc.textContent = 'MoveNet Thorough @ 15fps';
+      return true;
+    } catch (err) {
+      console.error('Model error:', err);
+      return false;
+    }
+  }
+
+  // ── Bbox crop ──
+  function computeCropBox(kp, vw, vh) {
+    const valid = kp.filter(p => p.score > 0.25);
+    if (valid.length < 4) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of valid) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const padX = w * 0.25, padY = h * 0.25;
+    let x = Math.max(0, minX - padX);
+    let y = Math.max(0, minY - padY);
+    let cw = Math.min(vw - x, w + padX * 2);
+    let ch = Math.min(vh - y, h + padY * 2);
+    const side = Math.max(cw, ch);
+    x = Math.max(0, Math.min(vw - side, x - (side - cw) / 2));
+    y = Math.max(0, Math.min(vh - side, y - (side - ch) / 2));
+    return { x, y, w: Math.min(side, vw - x), h: Math.min(side, vh - y) };
+  }
+
+  // ── Drawing ──
+  function drawSkeleton(kp) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height;
+    const vw = video.videoWidth || w, vh = video.videoHeight || h;
+    const pts = kp.map(p => ({ x: p.x * (w / vw), y: p.y * (h / vh), score: p.score }));
+
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 5;
+    for (const [a, b] of SKELETON) {
+      const pa = pts[a], pb = pts[b];
+      if (pa.score > CONF_THRESHOLD && pb.score > CONF_THRESHOLD) {
+        ctx.strokeStyle = '#22c55e';
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+      }
+    }
+    for (const p of pts) {
+      if (p.score > CONF_THRESHOLD) {
+        ctx.fillStyle = p.score > 0.6 ? '#ffffff' : '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (debugOn) {
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#0f0';
+      pts.forEach((p, i) => {
+        if (p.score > 0.2) ctx.fillText(i, p.x + 8, p.y - 4);
+      });
+    }
+  }
+
+  // ── Main loop ──
+  async function loop() {
+    if (!running) return;
+    requestAnimationFrame(loop);
+
+    if (paused || !detector || video.readyState < 2) return;
+
+    const now = performance.now();
+    if (now - lastInferenceTs < TARGET_INTERVAL_MS) return;
+
+    // Battery guard: stationary detection
+    if (stationaryStart && now - stationaryStart > STATIONARY_MS) {
+      if (now - lastInferenceTs < SLEEP_MS) return;
+      sBatt.textContent = 'Sleeping';
+      sBatt.className = 'val warn';
+    } else {
+      sBatt.textContent = 'Active';
+      sBatt.className = 'val good';
+    }
+
+    const t0 = performance.now();
+    lastInferenceTs = now;
+
+    try {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      let poses;
+      if (lastBox) {
+        poses = await detector.estimatePoses(video, {
+          cropAndResize: lastBox,
+          flipHorizontal: false
+        });
+        if (poses.length && poses[0].keypoints) {
+          // Unproject from crop-space
+          poses[0].keypoints = poses[0].keypoints.map(p => ({
+            x: lastBox.x + (p.x / vw) * lastBox.w,
+            y: lastBox.y + (p.y / vh) * lastBox.h,
+            score: p.score
+          }));
+        }
+      } else {
+        poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      }
+
+      const t1 = performance.now();
+      const latency = t1 - t0;
+
+      if (poses && poses.length > 0) {
+        const kp = poses[0].keypoints;
+        lastKeypoints = kp;
+        lastBox = computeCropBox(kp, vw, vh);
+        sCrop.textContent = lastBox ? 'Active' : 'Inactive';
+        sCrop.className = 'val ' + (lastBox ? 'good' : 'warn');
+
+        // Confidence
+        const avgConf = kp.reduce((s, p) => s + p.score, 0) / kp.length;
+        sConf.textContent = avgConf.toFixed(2);
+        sConf.className = 'val ' + (avgConf > 0.6 ? 'good' : avgConf > 0.4 ? 'warn' : 'bad');
+
+        // Stationary detection
+        if (kp[KP.LHIP].score > 0.3) {
+          const hipX = (kp[KP.LHIP].x + kp[KP.RHIP].x) / 2;
+          const hipY = (kp[KP.LHIP].y + kp[KP.RHIP].y) / 2;
+          if (loop._prevHip) {
+            const d = Math.hypot(hipX - loop._prevHip.x, hipY - loop._prevHip.y);
+            if (d < STATIONARY_PX) {
+              if (!stationaryStart) stationaryStart = now;
+            } else {
+              stationaryStart = null;
+            }
+          }
+          loop._prevHip = { x: hipX, y: hipY };
+        }
+
+        drawSkeleton(kp);
+
+        // Angles
+        const kneeL = angleBetween(kp[KP.LHIP], kp[KP.LKNE], kp[KP.LANK]);
+        const kneeR = angleBetween(kp[KP.RHIP], kp[KP.RKNE], kp[KP.RANK]);
+        const knee = (kneeL != null && kneeR != null) ? (kneeL + kneeR) / 2 : (kneeL ?? kneeR);
+        const hip = angleBetween(kp[KP.LSHO], kp[KP.LHIP], kp[KP.LKNE]);
+        const elbowL = angleBetween(kp[KP.LSHO], kp[KP.LELB], kp[KP.LWRI]);
+        const elbowR = angleBetween(kp[KP.RSHO], kp[KP.RELB], kp[KP.RWRI]);
+        const elbow = (elbowL != null && elbowR != null) ? (elbowL + elbowR) / 2 : (elbowL ?? elbowR);
+
+        const sKnee = pushSmooth('knee', knee);
+        const sHip = pushSmooth('hip', hip);
+        const sElbow = pushSmooth('elbow', elbow);
+
+        aKnee.textContent = sKnee != null ? Math.round(sKnee) + '°' : '--°';
+        aHip.textContent = sHip != null ? Math.round(sHip) + '°' : '--°';
+        aElbow.textContent = sElbow != null ? Math.round(sElbow) + '°' : '--°';
+
+        // FPS
+        const dt = now - lastFrameTs;
+        lastFrameTs = now;
+        if (dt > 0) {
+          fpsBuffer.push(1000 / dt);
+          if (fpsBuffer.length > 10) fpsBuffer.shift();
+          const fps = fpsBuffer.reduce((a,b)=>a+b,0) / fpsBuffer.length;
+          sFps.textContent = Math.round
